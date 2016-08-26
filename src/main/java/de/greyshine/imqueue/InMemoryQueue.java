@@ -42,11 +42,6 @@ public class InMemoryQueue {
         this( null, inReceiverClass );
     }
     
-    public IStatus getStatus() {
-    	
-    	return status;
-    }
-
     public InMemoryQueue(IConfiguration inConfiguration, Class<? extends IReceiver> inReceiverClass) {
 
         configuration = inConfiguration;
@@ -62,6 +57,11 @@ public class InMemoryQueue {
         	close();
             throw new IllegalArgumentException("Cannot instantiate Receiver: " + inReceiverClass, e);
         }
+    }
+    
+    public IStatus getStatus() {
+    	
+    	return status;
     }
 
     public void setConfiguration(final IConfiguration inConfiguration) {
