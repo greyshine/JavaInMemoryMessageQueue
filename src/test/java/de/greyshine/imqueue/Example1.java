@@ -7,8 +7,6 @@ import org.junit.Assert;
 import org.junit.Test;
 
 import de.greyshine.imqueue.InMemoryQueue;
-import de.greyshine.imqueue.InMemoryQueue.IConfiguration;
-import de.greyshine.imqueue.InMemoryQueue.IReceiver;
 
 public class Example1 {
 	
@@ -45,13 +43,17 @@ public class Example1 {
         public PrintStream getLogStream() {
             return System.out;
         }
+
+		@Override
+		public Class<? extends IReceiver> getReceiverClass() {
+			return TestReceiver.class;
+		}
     };
 
 	@Test
 	public void test() throws InterruptedException {
 		
-		InMemoryQueue imq = new InMemoryQueue(TestReceiver.class);
-        imq.setConfiguration( CONFIGURATION );
+		InMemoryQueue imq = new InMemoryQueue( CONFIGURATION );
 
         final long theThreadSleepTime = 101;
         final int theAmountMsgs = 5;

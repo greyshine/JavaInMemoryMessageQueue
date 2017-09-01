@@ -11,7 +11,7 @@ import java.util.Set;
 public class InMemoryQueue {
 
     private IConfiguration configuration;
-    private List<Item> messages = new ArrayList<>();
+    private List<Message> messages = new ArrayList<>();
 
     private boolean isCloseSignal = false;
     private boolean isClosed = false;
@@ -39,14 +39,25 @@ public class InMemoryQueue {
     };
 
     public InMemoryQueue(Class<? extends IReceiver> inReceiverClass) {
-        this( null, inReceiverClass );
+        
+    	this( new IConfiguration() {
+
+			@Override
+			public Class<? extends IReceiver> getReceiverClass() {
+				return inReceiverClass;
+			}
+		} );
     }
     
-    public InMemoryQueue(IConfiguration inConfiguration, Class<? extends IReceiver> inReceiverClass) {
+    public InMemoryQueue(IConfiguration inConfiguration) {
 
+    	if ( inConfiguration == null ) {
+    		throw new IllegalArgumentException( "no configuration given" );
+    	}
+    	
         configuration = inConfiguration;
 
-        receiverClass = inReceiverClass;
+        receiverClass = inConfiguration.getReceiverClass();
 
         try {
 
@@ -55,102 +66,21 @@ public class InMemoryQueue {
         } catch (Exception e) {
 
         	close();
-            throw new IllegalArgumentException("Cannot instantiate Receiver: " + inReceiverClass, e);
+            throw new IllegalArgumentException("Cannot instantiate Receiver: " + receiverClass, e);
         }
+        
+        if ( inConfiguration.serializeMessagesOnClose() ) {
+        	throw new IllegalStateException( "serializing messages is not yet implemented" );
+        }
+        
     }
     
     public IStatus getStatus() {
-    	
     	return status;
-    }
-
-    public void setConfiguration(final IConfiguration inConfiguration) {
-
-        // create a failsafe configuration
-        configuration = new IConfiguration() {
-
-            @Override
-            public PrintStream getLogStream() {
-
-                return inConfiguration == null ? null : inConfiguration.getLogStream();
-            }
-
-            @Override
-            public boolean serializeMessagesOnClose() {
-
-                if ( inConfiguration != null && inConfiguration.serializeMessagesOnClose() == true ) {
-                    throw new IllegalArgumentException("serializing messages is not supported");
-                }
-
-                return false;
-            }
-
-            @Override
-            public long getThreadWaitTimeout() {
-
-                try {
-
-                    final long v = inConfiguration.getThreadWaitTimeout();
-
-                    return v < 1 ? DEFAULT_THREAD_WAIT_TIME : v;
-
-                } catch(Exception e) {
-
-                    return DEFAULT_THREAD_WAIT_TIME;
-                }
-
-            }
-
-            @Override
-            public int getMaxReceiverThreads() {
-
-                try {
-                    final int v = inConfiguration.getMaxReceiverThreads();
-
-                    return v < 1 ? DEFAULT_MAX_RECEIVER_THREADS : v;
-
-                } catch(Exception e) {
-
-                    return DEFAULT_MAX_RECEIVER_THREADS;
-                }
-            }
-
-            @Override
-            public long getMaxReceiverThreadTimeToLive() {
-
-                try {
-
-                    final long v = inConfiguration.getMaxReceiverThreadTimeToLive();
-
-                    return v < 1 ? DEFAULT_MAX_RECEIVER_THREAD_TIMERTOLIVE : v;
-
-                } catch(Exception e) {
-
-                    return DEFAULT_MAX_RECEIVER_THREADS;
-                }
-            }
-
-            @Override
-            public long getMaxReceiverThreadExecutions() {
-
-                try {
-
-                    final long v = inConfiguration.getMaxReceiverThreadExecutions();
-
-                    return v < 1 ? DEFAULT_MAX_RECEIVER_THREAD_EXECUTIONS : v;
-
-                } catch(Exception e) {
-
-                    return DEFAULT_MAX_RECEIVER_THREAD_EXECUTIONS;
-                }
-            }
-        };
-
     }
 
     private void log(Object inSrc, Object inMessage) {
 
-        //String theMsg = "[" + (inSrc == null ? "?" : inSrc) + "] " + Thread.currentThread().getName() + "\n"+ inMessage;
         final String theMsg = "[" + (inSrc == null ? "?" : inSrc) + "] " + inMessage;
 
         final PrintStream theOut = configuration.getLogStream();
@@ -176,26 +106,38 @@ public class InMemoryQueue {
         log("QUEUE", "close announced");
     }
 
-    public void addMessage(Serializable inMsg) {
+    public void addMessage(Serializable inData) {
 
         if (isCloseSignal) {
             throw new IllegalStateException("Queue is closed.");
         }
 
-        if (receiverClass == null) {
-            throw new IllegalStateException("no receiver class defined");
-        }
-
-        if (inMsg == null) {
+        if (inData == null) {
             return;
         }
 
-        insertItem(inMsg);
+        insertMessageData(inData);
     }
+    
+    private Message fetchNextMessage() {
+    	
+    	synchronized (messages) {
+    		
+    		if ( messages.isEmpty() ) { return null; }
+    		
+    		messages.sort( (i1,i2)->{ return i1.minSendTime.compareTo( i2.minSendTime ); } );
+    		
+    		final Message theMessage = messages.get(0);
+    		
+    		if ( theMessage.minSendTime > System.currentTimeMillis() ) {
+    			
+    			return null;
+    		}
+    		
+    		messages.remove( theMessage );
 
-    interface IReceiver {
-
-        void handle(Serializable inMsg);
+            return theMessage;
+        }
     }
 
     private class ReceiverThread extends Thread {
@@ -219,14 +161,6 @@ public class InMemoryQueue {
             super.start();
         }
 
-        private Item fetchItem() {
-
-            synchronized (messages) {
-
-                return messages.isEmpty() ? null : messages.remove(0);
-            }
-        }
-
         void signalThreadKill() {
             isKilled = true;
             log("RT-" + handlerThreadCount, " received kill");
@@ -238,19 +172,19 @@ public class InMemoryQueue {
         	
         	InMemoryQueue.this.countThreadsCreated++;
 
-            Item item = null;
+            Message theMessage = null;
 
             while ( !isKilled ) {
 
-                item = fetchItem();
+                theMessage = fetchNextMessage();
 
-                if ( isCloseSignal && item == null ) {
+                if ( isCloseSignal && theMessage == null ) {
 
                     signalThreadKill();
                     continue;
                 }
 
-                if (item == null) {
+                if (theMessage == null) {
 
                     log("RT-" + handlerThreadCount, " wait for message (messages=" + getStatus().getCountMessagesOnQueue() + ") ...");
                     _wait(this);
@@ -262,28 +196,29 @@ public class InMemoryQueue {
 
                 try {
 
-                    synchronized (ReceiverThread.class) {
-
-                        log("RT-" + handlerThreadCount,
-                                "handling item ... " + item + " ; handles=" + this.executionCounts);
-
-                        item.start = System.currentTimeMillis();
-
-                        receiver.handle(item.msg);
-                    }
+                	receiverHandle(theMessage);
 
                 } catch (Exception e) {
+                	
+                	theMessage.exceptions.add(e);
+                	
+                	if ( theMessage.exceptions.size() > configuration.getMaxReceiveAttempts() ) {
 
-                    item.exception = e;
-
+                		receiverHandleException( theMessage );
+                	
+                	} else {
+                		
+                		theMessage.minSendTime = System.currentTimeMillis() + configuration.getTimeBetweenReceiveAttempts();
+                		
+                		rescheduleMessage( theMessage );
+                	}
+                	
                 } finally {
 
-                    item.end = System.currentTimeMillis();
-                    item = null;
-
                     final boolean isKill = isSubjectToKill();
+
                     if (isKill) {
-                        
+                    	
                     	signalThreadKill();
                     }
                     
@@ -293,11 +228,11 @@ public class InMemoryQueue {
                     	_notify( InMemoryQueue.this );
                     }
 
-                    log("RT-" + handlerThreadCount, " done handling " + item + "; subject to kill=" + isKilled);
+                    log("RT-" + handlerThreadCount, " done handling " + theMessage + "; subject to kill=" + isKilled);
                 }
             }
-
-            rescheduleMessage( item );
+            
+            // receiver thread isKilled, let's tidy up
 
             synchronized (InMemoryQueue.this.receiverThreadPool) {
 
@@ -306,24 +241,80 @@ public class InMemoryQueue {
 
             ensureCapacityReceiverThreads();
 
+            try {
+			
+            	// TODO add timeout for terminate invocation
+            	receiver.terminate();
+
+            } catch (Exception e) {
+				
+            	log("RT-" + handlerThreadCount, "receiver.terminate() failed: " + e);
+			}
+            
             log("RT-" + handlerThreadCount, "thread-run-end after " + executionCounts + " executions and "
-                    + (System.currentTimeMillis() - timeCreated) + " ms liftime, message=" + item);
+                    + (System.currentTimeMillis() - timeCreated) + " ms liftime, message=" + theMessage);
+            
+
+            
         }
 
-        private boolean isSubjectToKill() {
+        private void receiverHandle(Message theMessage) {
+        	
+            synchronized (ReceiverThread.class) {
+
+                log("RT-" + handlerThreadCount,
+                        "handling item ... " + theMessage + " ; handles=" + this.executionCounts);
+
+                theMessage.start = System.currentTimeMillis();
+                theMessage.end = null;
+
+                receiver.handle(theMessage.data);
+                
+                theMessage.end = System.currentTimeMillis();
+                
+            }
+        }
+        
+        private void receiverHandleException(Message inMessage) {
+			
+        	synchronized (ReceiverThread.class) {
+
+                log("RT-" + handlerThreadCount,
+                        "handling message with exceptions ... " + inMessage + " ; handles=" + this.executionCounts);
+
+                inMessage.start = System.currentTimeMillis();
+                inMessage.end = null;
+
+                try {
+				
+                	receiver.handleException( inMessage.exceptions , inMessage.data );
+                	
+				} catch (Exception e) {
+				
+					// intended swallow
+
+				} finally {
+					
+					inMessage.end = System.currentTimeMillis();
+				}
+            }
+			
+		}
+
+		private boolean isSubjectToKill() {
 
             if (InMemoryQueue.this.isCloseSignal) {
                 return true;
             }
 
-            final long theMaxHandles = configuration.getMaxReceiverThreadExecutions();
+            final long theMaxHandles = defaultIfLess1(configuration.getMaxReceiverThreadExecutions(), IConfiguration.DEFAULT_MAX_RECEIVER_THREAD_EXECUTIONS);
 
             if (theMaxHandles < executionCounts) {
                 log("RT-" + handlerThreadCount, " subject to kill due handle count");
                 return true;
             }
 
-            final long theTimeToLive = configuration.getMaxReceiverThreadTimeToLive();
+            final long theTimeToLive = defaultIfLess1(configuration.getMaxReceiverThreadTimeToLive(), IConfiguration.DEFAULT_MAX_RECEIVER_THREAD_TIMERTOLIVE);
 
             if (theTimeToLive > 0 && System.currentTimeMillis() > (this.timeCreated + theTimeToLive)) {
 
@@ -340,31 +331,9 @@ public class InMemoryQueue {
         }
     }
 
-    private class Item implements Serializable {
+    private IReceiver instantiateReceiver() {
 
-        private static final long serialVersionUID = 4217360355156014416L;
-
-        public final long creationTime = System.currentTimeMillis();
-        public long start;
-        public long end;
-        public Exception exception;
-
-        final Serializable msg;
-
-        public Item(Serializable inMsg) {
-            this.msg = inMsg;
-        }
-
-        @Override
-        public String toString() {
-            return "Item [creationTime=" + creationTime + ", start=" + start + ", end=" + end + ", exception="
-                    + exception + ", msg=" + msg + "]";
-        }
-    }
-
-    private IReceiver instantiateReceiver() throws InstantiationException, IllegalAccessException {
-
-        return receiverClass.newInstance();
+    	return configuration.getReceiverFactory( configuration.getReceiverClass() ).create();
     }
 
     private void _wait(Object inObject) {
@@ -373,7 +342,7 @@ public class InMemoryQueue {
 
             try {
 
-                long waitTimeout = configuration.getThreadWaitTimeout();
+                long waitTimeout = defaultIfLess1(configuration.getThreadWaitTimeout(), IConfiguration.DEFAULT_THREAD_WAIT_TIME);
                 waitTimeout = waitTimeout > 0 ? waitTimeout : 900;
                 inObject.wait(waitTimeout);
 
@@ -389,11 +358,11 @@ public class InMemoryQueue {
         }
     }
 
-    private void insertItem(Serializable inMsg) {
+    private void insertMessageData(Serializable inData) {
 
         synchronized (messages) {
 
-            final Item item = new Item(inMsg);
+            final Message item = new Message(inData);
             messages.add(item);
             log("MAIN", "added message: " + item);
 
@@ -403,14 +372,19 @@ public class InMemoryQueue {
         }
     }
 
-    private void rescheduleMessage(Item item) {
+    private void rescheduleMessage(Message inMessage) {
 
-        if ( item == null ) { return; }
+        if ( inMessage == null ) { return; }
 
         synchronized (messages) {
 
-            messages.add(0,item);
-            log("MAIN", "re-added message: " + item);
+        	if ( !messages.contains( inMessage ) ) {
+        		
+        		// if block must always happen!
+        		messages.add(inMessage);
+        	}
+        	
+            log("MAIN", "re-added message: " + inMessage);
 
             ensureCapacityReceiverThreads();
 
@@ -420,7 +394,7 @@ public class InMemoryQueue {
 
     private void ensureCapacityReceiverThreads() {
 
-        final int theConfiguredThreads = configuration.getMaxReceiverThreads();
+        final int theConfiguredThreads = defaultIfLess1(configuration.getMaxReceiverThreads(), IConfiguration.DEFAULT_MAX_RECEIVER_THREADS);
 
         log("POOL","ensure-capacity ...; isCloseSignal="+ isCloseSignal +", threads="+ receiverThreadPool.size() +" messages="+ getCountMessagesInQueue());
 
@@ -450,41 +424,6 @@ public class InMemoryQueue {
         }
     }
 
-    public interface IStatus {
-
-        int getCountMessagesOnQueue();
-        long getCountReceiverThreadsCreated();
-    }
-
-    public interface IConfiguration {
-
-        int DEFAULT_MAX_RECEIVER_THREADS = 1;
-
-        long DEFAULT_MAX_RECEIVER_THREAD_TIMERTOLIVE = 3 * 10L * 1000;
-        long DEFAULT_MAX_RECEIVER_THREAD_EXECUTIONS = 100;
-
-        /**
-         * 10 seks
-         */
-        long DEFAULT_THREAD_WAIT_TIME = 10*1000;
-
-        int getMaxReceiverThreads();
-
-        long getThreadWaitTimeout();
-
-        long getMaxReceiverThreadExecutions();
-
-        long getMaxReceiverThreadTimeToLive();
-
-        /**
-         * when <code>false</code> the queue will be worked off by the handlers
-         * @return
-         */
-        public boolean serializeMessagesOnClose();
-
-        PrintStream getLogStream();
-    }
-
 	public void waitForClosed() {
 		
 		while( !this.isClosed ) {
@@ -492,5 +431,15 @@ public class InMemoryQueue {
 			_wait( this );
 		}
 		
+	}
+	
+	private static int defaultIfLessEqual0(int v, int d) {
+		return v <= 0 ? d : v;
+	}
+	private static int defaultIfLess1(int v, int d) {
+		return v < 1 ? d : v;
+	}
+	private static long defaultIfLess1(long v, long d) {
+		return v < 1 ? d : v;
 	}
 }
