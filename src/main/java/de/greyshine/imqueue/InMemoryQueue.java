@@ -1,5 +1,11 @@
 package de.greyshine.imqueue;
 
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
 import java.io.PrintStream;
 import java.io.Serializable;
 import java.util.ArrayList;
@@ -7,6 +13,7 @@ import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 
 public class InMemoryQueue {
 
@@ -73,9 +80,74 @@ public class InMemoryQueue {
         	throw new IllegalStateException( "serializing messages is not yet implemented" );
         }
         
+        // read previous serialized files
+        readSerializedMessages();
+        
     }
     
-    public IStatus getStatus() {
+    private void readSerializedMessages() {
+		
+    	final File theDirectory = configuration.getSerialisationDirectory();
+    	
+    	if ( !theDirectory.isDirectory() ) { return; }
+    	
+    	File[] theFiles = theDirectory.listFiles( (f)->{ return f.isFile(); } );
+    	
+    	for( File aFile : theFiles) {
+    		
+    		try ( ObjectInputStream theOis = new ObjectInputStream( new FileInputStream( aFile ) ) ) {
+    			
+    			Message theMessage = (Message) theOis.readObject();
+    			
+    			log("init", "deserialized: "+ theMessage);
+    			
+    			rescheduleMessage(theMessage);
+    			
+    		} catch(Exception e) {
+    			
+    			System.err.println( "failed to read / deserialze: "+ aFile+ ": "+e );
+    		}
+    	}
+	}
+    
+    private void writeSerializedMessages() {
+    	
+    	final File theOutputFolder = configuration.getSerialisationDirectory().getAbsoluteFile();
+    	
+    	if ( !theOutputFolder.isDirectory() ) {
+    		
+    		theOutputFolder.mkdirs();
+    	}
+
+    	if ( !theOutputFolder.isDirectory() ) {
+    		
+    		throw new IllegalStateException("cannot access directory for serialization: "+ theOutputFolder);
+    	}
+    	
+    	synchronized ( messages ) {
+			
+    		for( Message theMessage : new ArrayList<>(messages) ) {
+    			
+    			boolean isSuccessful = true;
+    			
+    			try (ObjectOutputStream oos = new ObjectOutputStream( new FileOutputStream( new File( theOutputFolder, UUID.randomUUID().toString()+".ser" ) ) ) ) {
+					
+    				oos.writeObject( theMessage );
+    				
+				} catch (Exception e) {
+					
+					isSuccessful = false;
+					System.err.println( "failed to serialze message: "+ theMessage );
+				} 
+    			
+    			if (isSuccessful) {
+    				messages.remove( theMessage );
+    			}
+    		}
+		}
+    }
+
+	public IStatus getStatus() {
     	return status;
     }
 
@@ -101,9 +173,15 @@ public class InMemoryQueue {
 
         isCloseSignal = true;
         
+        if ( configuration.serializeMessagesOnClose() ) {
+        	writeSerializedMessages();
+        }
+        
         _notify( this );
         
         log("QUEUE", "close announced");
+        
+        waitForClosed();
     }
 
     public void addMessage(Serializable inData) {
@@ -253,9 +331,6 @@ public class InMemoryQueue {
             
             log("RT-" + handlerThreadCount, "thread-run-end after " + executionCounts + " executions and "
                     + (System.currentTimeMillis() - timeCreated) + " ms liftime, message=" + theMessage);
-            
-
-            
         }
 
         private void receiverHandle(Message theMessage) {
@@ -298,7 +373,6 @@ public class InMemoryQueue {
 					inMessage.end = System.currentTimeMillis();
 				}
             }
-			
 		}
 
 		private boolean isSubjectToKill() {
@@ -425,17 +499,11 @@ public class InMemoryQueue {
     }
 
 	public void waitForClosed() {
-		
 		while( !this.isClosed ) {
-			
 			_wait( this );
 		}
-		
 	}
-	
-	private static int defaultIfLessEqual0(int v, int d) {
-		return v <= 0 ? d : v;
-	}
+
 	private static int defaultIfLess1(int v, int d) {
 		return v < 1 ? d : v;
 	}

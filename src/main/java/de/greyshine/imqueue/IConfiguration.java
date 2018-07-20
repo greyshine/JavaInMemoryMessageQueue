@@ -1,5 +1,6 @@
 package de.greyshine.imqueue;
 
+import java.io.File;
 import java.io.PrintStream;
 
 public interface IConfiguration {
@@ -73,6 +74,10 @@ public interface IConfiguration {
 	 */
 	default long getTimeBetweenReceiveAttempts() {
 		return 10 * 1000;
+	}
+	
+	default File getSerialisationDirectory() {
+		return new File(".", InMemoryQueue.class.getSimpleName()+File.separator+getReceiverClass().getTypeName());
 	}
 
 }
